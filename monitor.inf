@@ -1,0 +1,27 @@
+; GruzOS Monitor INF
+; Copyright (c) FlatronTech 2026
+
+[Version]
+Signature="$CHICAGO$"
+Class=Monitor
+ClassGUID={4D36E96E-E325-11CE-BFC1-08002BE10318}
+Provider=%VendorName%
+DriverVer=10/11/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 10,System32\Drivers
+
+[Manufacturer]
+%VendorName%=FlatronTech,NTx86
+
+[FlatronTech.NTx86]
+%Mon.DeviceDesc%=Mon_Inst,*PNP09FF
+
+[Mon_Inst]
+CopyFiles=Mon_CopyFiles
+
+[Mon_CopyFiles]
+
+[Strings]
+VendorName="FlatronTech"
+Mon.DeviceDesc="Generic monitor"

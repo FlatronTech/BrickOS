@@ -1,0 +1,27 @@
+; GruzOS Graphics/Display INF
+; Copyright (c) FlatronTech 2026
+
+[Version]
+Signature="$CHICAGO$"
+Class=Display
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider=%VendorName%
+DriverVer=10/11/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 10,System32\Drivers
+
+[Manufacturer]
+%VendorName%=FlatronTech,NTx86
+
+[FlatronTech.NTx86]
+%Disp.DeviceDesc%=Disp_Inst,PCI\CC_0300
+
+[Disp_Inst]
+CopyFiles=Disp_CopyFiles
+
+[Disp_CopyFiles]
+
+[Strings]
+VendorName="FlatronTech"
+Disp.DeviceDesc="GruzOS basic display adapter"

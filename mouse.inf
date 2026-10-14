@@ -1,0 +1,27 @@
+; GruzOS Mouse INF
+; Copyright (c) FlatronTech 2026
+
+[Version]
+Signature="$CHICAGO$"
+Class=Mouse
+ClassGUID={4D36E96F-E325-11CE-BFC1-08002BE10318}
+Provider=%VendorName%
+DriverVer=10/11/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 10,System32\Drivers
+
+[Manufacturer]
+%VendorName%=FlatronTech,NTx86
+
+[FlatronTech.NTx86]
+%Mouse.DeviceDesc%=Mouse_Inst,*PNP0F03,*PNP0F13
+
+[Mouse_Inst]
+CopyFiles=Mouse_CopyFiles
+
+[Mouse_CopyFiles]
+
+[Strings]
+VendorName="FlatronTech"
+Mouse.DeviceDesc="GruzOS generic mouse"
