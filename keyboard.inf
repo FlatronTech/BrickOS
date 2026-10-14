@@ -1,4 +1,4 @@
-; GruzOS Keyboard INF
+; BrickOS Keyboard INF
 ; Copyright (c) FlatronTech 2026
 
 [Version]
@@ -24,4 +24,4 @@ CopyFiles=Kbd_CopyFiles
 
 [Strings]
 VendorName="FlatronTech"
-Kbd.DeviceDesc="GruzOS generic PS/2 keyboard"
+Kbd.DeviceDesc="BrickOS generic PS/2 keyboard"
