@@ -1,4 +1,4 @@
-; GruzOS Graphics/Display INF
+; BrickOS Graphics/Display INF
 ; Copyright (c) FlatronTech 2026
 
 [Version]
@@ -24,4 +24,4 @@ CopyFiles=Disp_CopyFiles
 
 [Strings]
 VendorName="FlatronTech"
-Disp.DeviceDesc="GruzOS basic display adapter"
+Disp.DeviceDesc="BrickOS basic display adapter"
