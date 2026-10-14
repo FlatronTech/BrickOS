@@ -1,4 +1,4 @@
-; GruzOS Mouse INF
+; BrickOS Mouse INF
 ; Copyright (c) FlatronTech 2026
 
 [Version]
@@ -24,4 +24,4 @@ CopyFiles=Mouse_CopyFiles
 
 [Strings]
 VendorName="FlatronTech"
-Mouse.DeviceDesc="GruzOS generic mouse"
+Mouse.DeviceDesc="BrickOS generic mouse"
