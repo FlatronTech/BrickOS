@@ -17,7 +17,7 @@ dd 0
 dd 0
 db 0,0,0x29
 dd 0x20260828
-db 'GRUZOS     '
+db 'BRICKOS    '
 db 'FAT12   '
 
 boot:
@@ -28,32 +28,12 @@ mov ss,ax
 mov sp,0x7C00
 mov [0x700],dl
 
-mov si,m0
-call print
-
 ; A20 gate
 mov ax,0x2401
 int 0x15
 in al,0x92
 or al,2
 out 0x92,al
-
-; E820 Memory Map
-xor ebx,ebx
-mov di,0x720
-mov edx,0x534D4150
-.en:
-mov eax,0xE820
-mov ecx,20
-int 0x15
-jc .ed
-cmp eax,0x534D4150
-jne .ed
-add di,20
-inc dword [0x71C]
-test ebx,ebx
-jnz .en
-.ed:
 
 ; BIOS 8x16 font
 mov ax,0x1130
@@ -66,54 +46,81 @@ movzx ebx,bp
 add eax,ebx
 mov [0x710],eax
 
-; VESA Mode 0x4112 (or 0x4140)
-mov cx,0x112
-mov ax,0x4F02
-mov bx,0x4112
+; VESA Mode selector from CMOS 0x38 (1=800x600, 2=640x480)
+mov si, vmodes_800
+mov al, 0x38
+out 0x70, al
+in al, 0x71
+cmp al, 2
+jne .mloop
+mov si, vmodes_640
+
+.mloop:
+cs lodsw
+test ax, ax
+jz .vf
+mov bx, ax
+mov [0x702], bx ; save current mode being tried
+mov ax, 0x4F02
 int 0x10
-cmp ax,0x4F
-je .vok
-mov cx,0x140
-mov ax,0x4F02
-mov bx,0x4140
-int 0x10
-cmp ax,0x4F
-jne .vf
-.vok:
+cmp ax, 0x004F
+jne .mloop
+
+mov cx, bx
+and cx, 0x1FF
 push ds
 pop es
-mov ax,0x4F01
-mov di,0xC00
+mov ax, 0x4F01
+mov di, 0xC00
 int 0x10
-cmp ax,0x4F
-jne .vf
-mov eax,[0xC28]
-mov [0x704],eax
-mov ax,[0xC10]
-mov [0x70C],ax
-mov al,[0xC19]
-mov [0x70E],al
-mov byte [0x70F],1
-jmp .rd
+cmp ax, 0x004F
+jne .mloop
+
+; Check if LFB address is valid (not 0) and at least 24 bpp
+mov eax, [0xC28]
+test eax, eax
+jz .mloop
+mov al, [0xC19]
+cmp al, 24
+jb .mloop
+
+mov [0x704], eax
+mov ax, [0xC12]
+mov [0x708], ax
+mov ax, [0xC14]
+mov [0x70A], ax
+mov ax, [0xC10]
+mov [0x70C], ax
+mov al, [0xC19]
+mov [0x70E], al
+mov byte [0x70F], 1
+jmp unreal
+
 .vf:
-mov byte [0x70F],0
-.rd:
+mov byte [0x70F], 0
 
-; RAMDISK (200 sectors) to 0x2000:0000
-mov bp,0
-mov cx,200
-mov dx,0x2000
-call load
+unreal:
+; Unreal Mode setup: load GDT and set FS limit to 4GB
+cli
+lgdt [gdtd]
+mov eax,cr0
+or al,1
+mov cr0,eax
+jmp $+2
+mov bx,0x10
+mov fs,bx
+and al,0xFE
+mov cr0,eax
+jmp $+2
+sti
 
-; KERNEL (96 sectors) to 0x1000:0000
-mov bp,33
-mov cx,96
-mov dx,0x1000
-call load
+; Load entire 2880 sectors (1.44MB) of disk to 0x800000 via 0x2000:0000 buffer
+xor bp,bp           ; start LBA = 0
+mov cx,2880         ; 2880 sectors (1.44MB floppy)
+call load_unreal
 
 ; Enter Protected Mode
 cli
-lgdt [gdtd]
 mov eax,cr0
 or al,1
 mov cr0,eax
@@ -126,84 +133,97 @@ mov ds,eax
 mov es,eax
 mov ss,eax
 mov esp,0x90000
+
+; Copy kernel (128KB) from 0x800000 + 33*512 to 0x10000
+mov esi, 0x800000 + 33*512
+mov edi, 0x10000
+mov ecx, 32768
+rep movsd
+
 call 0x10000
 jmp $
 
+vmodes_800:
+dw 0x4115, 0x4143, 0x4118
+vmodes_640:
+dw 0x4112, 0x4142, 0
+
 [bits 16]
-load:
-mov es,dx
+load_unreal:
+mov ax, 0x2000
+mov es, ax          ; ES = 0x2000 (buffer 0x20000)
 .next:
 push cx
+; Calculate CHS from LBA in BP
 mov ax,bp
 xor dx,dx
 mov bx,36
 div bx
-mov ch,al
+mov ch,al           ; cylinder = LBA / 36
 mov ax,dx
 mov bl,18
 div bl
-mov dh,al
-mov cl,ah
+mov dh,al           ; head = (LBA % 36) / 18
+mov cl,ah           ; sector = (LBA % 18) + 1
 inc cl
+
 mov al,19
-sub al,cl
+sub al,cl           ; sectors remaining on this track
 xor ah,ah
 pop bx
 cmp ax,bx
 jbe .cok
 mov ax,bx
 .cok:
-mov si,es
-shl si,4
-neg si
-jz .nb
-shr si,9
-cmp ax,si
-jbe .nb
-mov ax,si
-.nb:
 push bx
-push ax
+push ax             ; save sectors to read
 mov ah,2
 mov dl,[0x700]
 xor bx,bx
 int 0x13
 jnc .rok
+; Reset disk on error and retry
 xor ax,ax
 mov dl,[0x700]
 int 0x13
 pop ax
 pop cx
 jmp .next
+
 .rok:
-pop ax
+pop ax              ; AX = sectors read
+pop cx              ; CX = remaining sectors
+; Copy AX sectors from 0x20000 to fs:[ram_ptr]
+push cx
+push si
+push di
+movzx ecx,ax
+shl ecx,7           ; ECX = AX * 128 dwords = AX * 512 bytes
+xor esi,esi
+mov edi,[ram_ptr]
+.cpy:
+mov edx,[es:esi]
+a32 mov [fs:edi],edx
+add esi,4
+add edi,4
+dec ecx
+jnz .cpy
+mov [ram_ptr],edi
+pop di
+pop si
 pop cx
+
 add bp,ax
 sub cx,ax
-shl ax,5
-mov bx,es
-add bx,ax
-mov es,bx
-test cx,cx
 jnz .next
 ret
 
-print:
-lodsb
-test al,al
-jz .done
-mov ah,0x0E
-int 0x10
-jmp print
-.done:
-ret
-
-m0 db 'GruzOS...',13,10,0
+ram_ptr dd 0x800000
 
 gdt:
 dq 0
-dw 0xFFFF,0,0x9A00,0xCF
-dw 0xFFFF,0,0x9200,0xCF
+dw 0xFFFF,0,0x9A00,0xCF  ; 4GB 32-bit Code (base 0)
+dw 0xFFFF,0,0x9200,0xCF  ; 4GB 32-bit Data (base 0)
 gdtd:
 dw $-gdt-1
 dd gdt

@@ -60,18 +60,18 @@ int main(int argc, char** argv) {
     unsigned char* boot = load(argv[1], &bs);
     unsigned char* kern = load(argv[2], &ks);
     if (bs > 512) { printf("boot too big\n"); return 1; }
-    if (ks > 96*512) { printf("kernel too big\n"); return 1; }
+    if (ks > 512*512) { printf("kernel too big\n"); return 1; }
     memcpy(img, boot, bs);
     fat_set(0, 0xFF0); fat_set(1, 0xFFF);
-    add_file("GRUZOS.BIN", kern, ks);
+    add_file("BRICKOS.BIN", kern, ks);
     const char* readme =
-        "GruzOS v2.0 - hobby OS by Flatronix.\r\n"
+        "BrickOS v2.0 - hobby OS by Flatronix.\r\n"
         "32-bit protected mode, own bootloader,\r\n"
-        "IDT+PIT interrupts, FAT12 RAM disk,\r\n"
+        "IDT+PIT interrupts, FAT12/16 RAM disk,\r\n"
         "VESA graphics console with BIOS font.\r\n"
         "Commands: help ls cat meminfo sysinfo time clear about reboot\r\n";
     add_file("README.TXT", (unsigned char*)readme, strlen(readme));
-    const char* hello = "Hello from GruzOS FAT12 floppy!\r\n";
+    const char* hello = "Hello from BrickOS!\r\n";
     add_file("HELLO.TXT", (unsigned char*)hello, strlen(hello));
     int inf_sz;
     unsigned char* inf_mouse = load("mouse.inf", &inf_sz);
@@ -85,6 +85,13 @@ int main(int argc, char** argv) {
     int font_sz;
     unsigned char* font_data = load("FONT.BIN", &font_sz);
     add_file("FONT.BIN", font_data, font_sz);
+    FILE* fbmp = fopen("BRICK.BMP", "rb");
+    if (fbmp) {
+        fclose(fbmp);
+        int bmp_sz;
+        unsigned char* bmp_d = load("BRICK.BMP", &bmp_sz);
+        add_file("BRICK.BMP", bmp_d, bmp_sz);
+    }
 
     FILE* f = fopen(argv[3], "wb");
     fwrite(img, 1, sizeof(img), f); fclose(f);
