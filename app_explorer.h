@@ -1,0 +1,10 @@
+#ifndef APP_EXPLORER_H
+#define APP_EXPLORER_H
+
+#include "kernel.h"
+
+void draw_explorer(struct Window* w);
+void explorer_click(struct Window* w, int mx, int my);
+int  explorer_is_hover_link(struct Window* w, int mx, int my);
+
+#endif
