@@ -63,7 +63,11 @@ void note_load_file(const char* filename) {
 void note_save(void) {
     char fbuf[NOTE_LINES * (NOTE_COLS + 2) + 1];
     int fi = 0;
+    int last_line = -1;
     for (int l = 0; l < NOTE_LINES; l++) {
+        if (note_buf[l][0] != 0) last_line = l;
+    }
+    for (int l = 0; l <= last_line; l++) {
         int len = my_strlen(note_buf[l]);
         for (int c = 0; c < len; c++) {
             fbuf[fi++] = note_buf[l][c];
@@ -71,9 +75,11 @@ void note_save(void) {
         fbuf[fi++] = '\r';
         fbuf[fi++] = '\n';
     }
-    fat_write_file(current_note_file[0] ? current_note_file : "NOTE.TXT", (u8*)fbuf, fi);
-    note_saved_t = ticks + 200;
-    note_dirty = 0;
+    int res = fat_write_file(current_note_file[0] ? current_note_file : "NOTE.TXT", (u8*)fbuf, fi);
+    if (res == 0) {
+        note_saved_t = ticks + 200;
+        note_dirty = 0;
+    }
 }
 
 void draw_notepad(struct Window* w) {

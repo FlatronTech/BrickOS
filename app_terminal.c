@@ -1,4 +1,5 @@
 #include "app_terminal.h"
+#include "drv_display.h"
 
 int term_active = 0;
 
@@ -208,6 +209,7 @@ void term_exec(const char* cmd) {
         u16 vesa_mode= *(u16*)0x702;
 
         term_print("VESA Framebuffer Info:\n");
+        term_print("  Driver     : "); term_print(drv_display_get_hw_name()); term_putchar('\n');
         term_print("  Active     : "); term_dec(vesa_ok); term_putchar('\n');
         term_print("  Mode       : 0x");
         term_putchar(hx[(vesa_mode >> 12) & 0xF]);

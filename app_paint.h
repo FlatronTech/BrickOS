@@ -5,8 +5,9 @@
 
 #define MAX_CANVAS_W 800
 #define MAX_CANVAS_H 600
-#define PAINT_CANVAS ((u32*)0x400000)
-#define PAINT_SCRATCH ((u8*)0x600000)
+/* Umieszczamy canvas na 10 MB (0xA00000) i scratch na 12 MB (0xC00000) — gwarantowane w fizycznej pamieci RAM */
+#define PAINT_CANVAS ((u32*)0xA00000)
+#define PAINT_SCRATCH ((u8*)0xC00000)
 
 extern int paint_dirty;
 extern char paint_filename[16];

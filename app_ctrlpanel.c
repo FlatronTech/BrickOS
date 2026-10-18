@@ -1,11 +1,11 @@
-#include "app_ctrlpanel.h"
+#include "drv_display.h"
 
 int ctrlpanel_tab = 0;
 u32 desktop_color = 0x1F5C8B;
-int pending_res = 1; /* 1 = 800x600, 2 = 640x480 */
+int pending_res = 0; /* 0 = 1280x960, 1 = 1024x768, 2 = 800x600, 3 = 640x480 */
 
-static int ctrlpanel_rebooting = 0;
-static u32 ctrlpanel_reboot_tick = 0;
+static int ctrlpanel_switched = 0;    /* 1 = success, 2 = error */
+static u32 ctrlpanel_switch_tick = 0; /* ticks when confirmation expires */
 
 static const u32 desk_pal[] = {
     0x1F5C8B, 0x004080, 0x205020, 0x602020,
@@ -15,14 +15,16 @@ static const u32 desk_pal[] = {
 
 void ctrlpanel_init(void) {
     ctrlpanel_tab = 0;
-    ctrlpanel_rebooting = 0;
-    ctrlpanel_reboot_tick = 0;
-    pending_res = (fw == 640) ? 2 : 1;
+    ctrlpanel_switched = 0;
+    ctrlpanel_switch_tick = 0;
+    if (fw >= 1200) pending_res = 0;
+    else if (fw >= 1000) pending_res = 1;
+    else if (fw >= 800) pending_res = 2;
+    else pending_res = 3;
 }
 
 static int get_display_buttons_y(int py0) {
-    /* Fixed base coordinate matching draw, click and hover */
-    return py0 + 150;
+    return py0 + 125;
 }
 
 void draw_ctrlpanel(struct Window* w) {
@@ -63,10 +65,10 @@ void draw_ctrlpanel(struct Window* w) {
 
     if (ctrlpanel_tab == 0) {
         gui_print("BrickOS System Information", content_x, cy2, 0x000080); cy2 += 22;
-        gui_print("OS Version:", content_x, cy2, 0x000000); gui_print("BrickOS 2.0", lx, cy2, 0x000080); cy2 += 18;
-        gui_print("Architecture:", content_x, cy2, 0x000000); gui_print("x86 32-bit Protected Mode", lx, cy2, 0x000080); cy2 += 18;
+        gui_print("OS Version:", content_x, cy2, 0x000000); gui_print("BrickOS 1.0", lx, cy2, 0x000080); cy2 += 18;
+        gui_print("Architecture:", content_x, cy2, 0x000000); gui_print("x86 32-bit", lx, cy2, 0x000080); cy2 += 18;
         gui_print("Vendor:", content_x, cy2, 0x000000); gui_print("FlatronTech", lx, cy2, 0x000080); cy2 += 18;
-        gui_print("Build:", content_x, cy2, 0x000000); gui_print("2026-10 Release", lx, cy2, 0x000080); cy2 += 18;
+        gui_print("Build:", content_x, cy2, 0x000000); gui_print("202610181", lx, cy2, 0x000080); cy2 += 18;
 
         char cpubrand[50];
         get_cpu_brand(cpubrand, 50);
@@ -94,6 +96,7 @@ void draw_ctrlpanel(struct Window* w) {
         get_rtc_time(rtc);
         gui_print("System Time:", content_x, cy2, 0x000000);
         gui_print(rtc, lx, cy2, 0x000080);
+
     } else if (ctrlpanel_tab == 1) {
         gui_print("Display Settings", content_x, cy2, 0x000080); cy2 += 22;
 
@@ -106,35 +109,44 @@ void draw_ctrlpanel(struct Window* w) {
         gui_print(resb, lx, cy2, 0x000080); cy2 += 18;
 
         gui_print("Video Driver:", content_x, cy2, 0x000000);
-        gui_print("VESA Linear Framebuffer", lx, cy2, 0x000080); cy2 += 18;
+        gui_print(drv_display_get_hw_name(), lx, cy2, 0x000080); cy2 += 18;
 
         gui_print("Refresh Rate:", content_x, cy2, 0x000000);
         gui_print("60 Hz", lx, cy2, 0x000080); cy2 += 22;
 
-        gui_print("Select New Resolution:", content_x, cy2, 0x000000); cy2 += 20;
+        gui_print("Select Resolution:", content_x, cy2, 0x000000); cy2 += 20;
 
         int by = get_display_buttons_y(py0);
-        int sel800 = (pending_res == 1);
-        int sel640 = (pending_res == 2);
+        int sel1280 = (pending_res == 0);
+        int sel1024 = (pending_res == 1);
+        int sel800  = (pending_res == 2);
+        int sel640  = (pending_res == 3);
 
-        if (ctrlpanel_rebooting) {
-            gui_rect(content_x, by, 250, 70, 0xC0C0C0);
-            gui_print("Restarting system...", content_x + 10, by + 10, 0x800000);
-            gui_print("Please wait.", content_x + 10, by + 30, 0x000000);
-            /* Reboot when timer fires */
-            if (ticks >= ctrlpanel_reboot_tick) {
-                outb(0x64, 0xFE);
-            }
+        gui_btn(content_x,       by,      120, 24, "1280 x 960", sel1280);
+        gui_btn(content_x + 130, by,      120, 24, "1024 x 768", sel1024);
+        gui_btn(content_x,       by + 28, 120, 24, "800 x 600",  sel800);
+        gui_btn(content_x + 130, by + 28, 120, 24, "640 x 480",  sel640);
+
+        /* Live switch button — zero reboots */
+        gui_btn(content_x + 40, by + 58, 170, 26, "Apply", 0);
+
+        if (pending_res == 0) {
+            gui_print("(1280x960 selected)", content_x + 45, by + 90, 0x008000);
+        } else if (pending_res == 1) {
+            gui_print("(1024x768 selected)", content_x + 45, by + 90, 0x008000);
+        } else if (pending_res == 2) {
+            gui_print("(800x600 selected)", content_x + 45, by + 90, 0x008000);
         } else {
-            gui_btn(content_x, by, 120, 24, "800 x 600", sel800);
-            gui_btn(content_x + 130, by, 120, 24, "640 x 480", sel640);
-            gui_btn(content_x + 40, by + 34, 170, 26, "Apply & Reboot", 0);
-            if (pending_res == 1) {
-                gui_print("(Selected: 800x600)", content_x + 45, by + 68, 0x008000);
-            } else {
-                gui_print("(Selected: 640x480)", content_x + 45, by + 68, 0x008000);
-            }
+            gui_print("(640x480 selected)", content_x + 45, by + 90, 0x008000);
         }
+
+        /* Show feedback */
+        if (ctrlpanel_switched == 1 && ticks < ctrlpanel_switch_tick) {
+            gui_print("Resolution changed live!", content_x + 40, by + 108, 0x008000);
+        } else if (ctrlpanel_switched == 2 && ticks < ctrlpanel_switch_tick) {
+            gui_print("Switch not supported by VM!", content_x + 30, by + 108, 0x800000);
+        }
+
     } else {
         gui_print("Desktop Appearance", content_x, cy2, 0x000080); cy2 += 22;
         gui_print("Select Desktop Color:", content_x, cy2, 0x000000); cy2 += 20;
@@ -180,29 +192,46 @@ void ctrlpanel_click(struct Window* w, int mx, int my) {
 
     if (ctrlpanel_tab == 1) {
         int by = get_display_buttons_y(py0);
-        /* 800x600 button */
+
+        /* 1280x960 selector */
         if (mx >= content_x && mx < content_x + 120 && my >= by && my < by + 24) {
-            pending_res = 1;
-            outb(0x70, 0x38);
-            outb(0x71, 1);
+            pending_res = 0;
             return;
         }
-        /* 640x480 button */
+        /* 1024x768 selector */
         if (mx >= content_x + 130 && mx < content_x + 250 && my >= by && my < by + 24) {
+            pending_res = 1;
+            return;
+        }
+        /* 800x600 selector */
+        if (mx >= content_x && mx < content_x + 120 && my >= by + 28 && my < by + 52) {
             pending_res = 2;
-            outb(0x70, 0x38);
-            outb(0x71, 2);
             return;
         }
-        /* Apply & Reboot */
-        if (mx >= content_x + 40 && mx < content_x + 210 && my >= by + 34 && my < by + 60) {
-            /* Save resolution to CMOS, show countdown, then reboot */
-            outb(0x70, 0x38);
-            outb(0x71, (u8)pending_res);
-            ctrlpanel_rebooting = 1;
-            ctrlpanel_reboot_tick = ticks + 150; /* ~1.5 sec */
+        /* 640x480 selector */
+        if (mx >= content_x + 130 && mx < content_x + 250 && my >= by + 28 && my < by + 52) {
+            pending_res = 3;
             return;
         }
+        /* Apply — LIVE mode switch, zero reboots */
+        if (mx >= content_x + 40 && mx < content_x + 210 && my >= by + 58 && my < by + 84) {
+            int tw = 800, th = 600;
+            if (pending_res == 0) { tw = 1280; th = 960; }
+            else if (pending_res == 1) { tw = 1024; th = 768; }
+            else if (pending_res == 2) { tw = 800;  th = 600; }
+            else if (pending_res == 3) { tw = 640;  th = 480; }
+
+            int ok = drv_display_set_resolution(tw, th);
+            if (ok) {
+                ctrlpanel_switched = 1;
+                ctrlpanel_switch_tick = ticks + 300;
+            } else {
+                ctrlpanel_switched = 2;
+                ctrlpanel_switch_tick = ticks + 300;
+            }
+            return;
+        }
+
     } else if (ctrlpanel_tab == 2) {
         int cy0 = py0 + 22;
         int cy2 = cy0 + 10 + 22 + 20;
@@ -236,7 +265,9 @@ int ctrlpanel_is_hover_link(struct Window* w, int mx, int my) {
         int by = get_display_buttons_y(py0);
         if (mx >= content_x && mx < content_x + 120 && my >= by && my < by + 24) return 1;
         if (mx >= content_x + 130 && mx < content_x + 250 && my >= by && my < by + 24) return 1;
-        if (mx >= content_x + 40 && mx < content_x + 210 && my >= by + 34 && my < by + 60) return 1;
+        if (mx >= content_x && mx < content_x + 120 && my >= by + 28 && my < by + 52) return 1;
+        if (mx >= content_x + 130 && mx < content_x + 250 && my >= by + 28 && my < by + 52) return 1;
+        if (mx >= content_x + 40 && mx < content_x + 210 && my >= by + 58 && my < by + 84) return 1;
     } else if (ctrlpanel_tab == 2) {
         int cy0 = py0 + 22;
         int cy2 = cy0 + 10 + 22 + 20;

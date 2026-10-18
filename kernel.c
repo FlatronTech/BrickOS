@@ -11,6 +11,8 @@
 #include "app_saveas.h"
 #include "app_welcome.h"
 #include "app_fileprops.h"
+#include "drv_display.h"
+#include "vesa_trampoline.h"
 
 #define VGA_MEMORY 0xB8000
 
@@ -438,7 +440,7 @@ void con_clear(void) {
     if (use_fb) {
         fb_rect(0, 0, fw, fh, COL_BG);
         fb_rect(0, 0, fw, 16, COL_BAR);
-        const char* t = "BrickOS 2.0";
+        const char* t = "BrickOS 1.0";
         for (int i = 0; t[i]; i++) fb_glyph(t[i], 2 + i, 0, 0x000000);
     }
     render_all();
@@ -524,6 +526,7 @@ int fat_get(int e) {
 }
 
 void fat_name83(const char* in, char* out) {
+    while (*in == ' ') in++;
     for (int i = 0; i < 11; i++) out[i] = ' ';
     int i;
     for (i = 0; in[i] && in[i] != '.' && i < 8; i++) {
@@ -574,16 +577,24 @@ int fat_read_file(const char* name, u8* dest, int max_sz) {
 }
 
 static void fat_set_entry(int e, int val) {
-    if (is_fat16) {
-        ((u16*)fatp)[e] = (u16)val;
-        return;
+    int spf = rd16(22);
+    if (spf == 0) spf = rd16(36);
+    int nf = ramdisk[16];
+    if (nf < 1) nf = 1;
+
+    for (int f = 0; f < nf; f++) {
+        u8* fp = ramdisk + (fat_sect + f * spf) * 512;
+        if (is_fat16) {
+            ((u16*)fp)[e] = (u16)val;
+        } else {
+            int i = e + e / 2;
+            int w = fp[i] | (fp[i + 1] << 8);
+            if (e & 1) w = (w & 0x000F) | (val << 4);
+            else w = (w & 0xF000) | (val & 0xFFF);
+            fp[i] = w & 0xFF;
+            fp[i + 1] = (w >> 8) & 0xFF;
+        }
     }
-    int i = e + e / 2;
-    int w = fatp[i] | (fatp[i + 1] << 8);
-    if (e & 1) w = (w & 0x000F) | (val << 4);
-    else w = (w & 0xF000) | (val & 0xFFF);
-    fatp[i] = w & 0xFF;
-    fatp[i + 1] = (w >> 8) & 0xFF;
 }
 
 static int fat_alloc_cluster(void) {
@@ -602,16 +613,32 @@ int fat_write_file(const char* name, const u8* data, int sz) {
 
     for (int i = 0; i < root_cnt; i++) {
         u8* e = root + i * 32;
-        if (e[0] == 0 || e[0] == 0xE5) {
+        if (e[0] == 0 || (u8)e[0] == 0xE5) {
             if (slot < 0) slot = i;
             if (e[0] == 0) break;
         } else {
             int ok = 1;
-            for (int j = 0; j < 11; j++) if (e[j] != n83[j]) ok = 0;
+            for (int j = 0; j < 11; j++) if (e[j] != n83[j]) { ok = 0; break; }
             if (ok) { slot = i; break; }
         }
     }
     if (slot < 0) return -1;
+
+    /* If this slot was an existing file with the same name, free its old cluster chain first */
+    u8* e = root + slot * 32;
+    int ok_same = 1;
+    for (int j = 0; j < 11; j++) {
+        if (e[j] != n83[j]) { ok_same = 0; break; }
+    }
+    if (ok_same && e[0] != 0 && (u8)e[0] != 0xE5) {
+        int old_cl = e[26] | (e[27] << 8);
+        int end_mark = is_fat16 ? 0xFFF8 : 0xFF8;
+        while (old_cl >= 2 && old_cl < end_mark) {
+            int next = fat_get(old_cl);
+            fat_set_entry(old_cl, 0);
+            old_cl = next;
+        }
+    }
 
     int clusters = (sz + 511) / 512;
     if (clusters == 0) clusters = 1;
@@ -620,7 +647,17 @@ int fat_write_file(const char* name, const u8* data, int sz) {
 
     for (int i = 0; i < clusters; i++) {
         int cl = fat_alloc_cluster();
-        if (cl < 0) return -1;
+        if (cl < 0) {
+            /* Rollback allocated clusters on failure */
+            int curr = first_cl;
+            int end_mark = is_fat16 ? 0xFFF8 : 0xFF8;
+            while (curr >= 2 && curr < end_mark) {
+                int next = fat_get(curr);
+                fat_set_entry(curr, 0);
+                curr = next;
+            }
+            return -1;
+        }
         fat_set_entry(cl, eoc_val);
         if (prev_cl >= 0) fat_set_entry(prev_cl, cl);
         else first_cl = cl;
@@ -637,9 +674,9 @@ int fat_write_file(const char* name, const u8* data, int sz) {
         }
     }
 
-    u8* e = root + slot * 32;
     for (int j = 0; j < 11; j++) e[j] = n83[j];
     e[11] = 0x20;
+    for (int j = 12; j < 26; j++) e[j] = 0;
     e[26] = first_cl & 0xFF; e[27] = (first_cl >> 8) & 0xFF;
     e[28] = sz & 0xFF; e[29] = (sz >> 8) & 0xFF; e[30] = (sz >> 16) & 0xFF; e[31] = (sz >> 24) & 0xFF;
     return 0;
@@ -743,6 +780,37 @@ void system_shutdown(void) {
 
 /* GUI Engine */
 u8* backbuf = (u8*)0x200000;
+
+/* BGA (Bochs/QEMU/VMware VBE Extensions) I/O ports */
+#define VBE_DISPI_IOPORT_INDEX          0x01CE
+#define VBE_DISPI_IOPORT_DATA           0x01CF
+#define VBE_DISPI_INDEX_ID              0x00
+#define VBE_DISPI_INDEX_XRES            0x01
+#define VBE_DISPI_INDEX_YRES            0x02
+#define VBE_DISPI_INDEX_BPP             0x03
+#define VBE_DISPI_INDEX_ENABLE          0x04
+#define VBE_DISPI_ENABLED               0x01
+#define VBE_DISPI_LFB_ENABLED           0x40
+
+static inline void bga_write(u16 index, u16 data) {
+    outw(VBE_DISPI_IOPORT_INDEX, index);
+    outw(VBE_DISPI_IOPORT_DATA, data);
+}
+
+static inline u16 bga_read(u16 index) {
+    outw(VBE_DISPI_IOPORT_INDEX, index);
+    return inw(VBE_DISPI_IOPORT_DATA);
+}
+
+/* Live display mode switch — delegates to unified hardware driver */
+void vesa_live_switch(u16 mode) {
+    int target_w = 800, target_h = 600;
+    if (mode == VESA_640x480) { target_w = 640; target_h = 480; }
+    else if (mode == 0x4118 || mode == 0x118) { target_w = 1024; target_h = 768; }
+    else if (mode == 0x4143 || mode == 0x143) { target_w = 1280; target_h = 960; }
+    drv_display_set_resolution(target_w, target_h);
+}
+
 
 void gui_pixel(int x, int y, u32 c) {
     if (x < 0 || x >= fw || y < 0 || y >= fh) return;
@@ -960,52 +1028,124 @@ void draw_cursor(int mx, int my) {
     else draw_cursor_normal(mx, my);
 }
 
-/* Boot animation */
+/* BrickOS XP-Style Boot Animation */
+static void draw_brickos_emblem(int fx, int fy) {
+    for (int y = 0; y < 16; y++) {
+        int shift = y / 2;
+        /* Tile 1: Cyan/Blue (top-left) */
+        for (int x = 6 + shift; x <= 20 + shift; x++) {
+            u32 color = (y == 0) ? 0x90E0FF : (y < 4 ? 0x38B4FF : (y < 11 ? 0x0078FF : 0x0040B8));
+            gui_pixel(fx + x, fy + 4 + y, color);
+        }
+        /* Tile 2: Emerald Green (top-right) */
+        for (int x = 25 + shift; x <= 39 + shift; x++) {
+            u32 color = (y == 0) ? 0x98FFA0 : (y < 4 ? 0x50E040 : (y < 11 ? 0x20A818 : 0x107010));
+            gui_pixel(fx + x, fy + 4 + y, color);
+        }
+    }
+
+    for (int y = 0; y < 16; y++) {
+        int shift = y / 2;
+        /* Tile 3: Crimson/Orange (bottom-left) */
+        for (int x = 6 + shift; x <= 20 + shift; x++) {
+            u32 color = (y == 0) ? 0xFFA088 : (y < 4 ? 0xFF5538 : (y < 11 ? 0xDD1818 : 0x990808));
+            gui_pixel(fx + x, fy + 24 + y, color);
+        }
+        /* Tile 4: Amber/Gold (bottom-right) */
+        for (int x = 25 + shift; x <= 39 + shift; x++) {
+            u32 color = (y == 0) ? 0xFFF090 : (y < 4 ? 0xFFD030 : (y < 11 ? 0xF09000 : 0xB86000));
+            gui_pixel(fx + x, fy + 24 + y, color);
+        }
+    }
+
+    /* Soft trailing light rays on right side */
+    for (int x = 46; x < 58; x++) {
+        int fade = (58 - x) * 14;
+        gui_pixel(fx + x, fy + 12, ((fade * 2) << 16) | (fade << 8) | 0x00);
+        gui_pixel(fx + x, fy + 32, (fade << 16) | ((fade * 2) << 8) | (fade * 3));
+    }
+}
+
 void boot_anim(void) {
     gui_rect(0, 0, fw, fh, 0x000000);
-    u32 seed = 12345;
-    for (int i = 0; i < 80; i++) {
-        seed = seed * 1664525 + 1013904223;
-        int sx = (seed >> 16) % fw;
-        int sy = (seed >> 8) % ((fh * 3) / 4);
-        u8 br = ((seed >> 24) & 3) * 60 + 60;
-        gui_pixel(sx, sy, (br << 16) | (br << 8) | br);
-    }
-    const char* logo = "BrickOS";
-    int lw = gui_str_width(logo) * 3;
-    int lx = (fw - lw) / 2, ly = fh / 2 - 80;
-    gui_str_big(logo, lx, ly, 0x4488FF, 3);
 
-    const char* sub = "Operating System 2.0";
-    int sl = gui_str_width(sub);
-    gui_print(sub, (fw - sl) / 2, ly + 55, 0x8899CC);
+    int lockup_w = 190;
+    int lx = (fw - lockup_w) / 2;
+    int ly = fh / 2 - 55;
 
-    const char* ft = "FlatronTech - 2026";
-    int fl = gui_str_width(ft);
-    gui_print(ft, (fw - fl) / 2, ly + 73, 0x505070);
+    /* BrickOS custom aerodynamic glass crest */
+    draw_brickos_emblem(lx, ly + 2);
 
-    int bx = (fw - 280) / 2, by = ly + 100, bh = 12;
-    gui_rect(bx - 2, by - 2, 284, 16, 0x303050);
-    gui_rect(bx, by, 280, bh, 0x101020);
+    /* Text */
+    int tx = lx + 58;
+    gui_print("FlatronTech", tx + 2, ly - 3, 0x8E8E9E);
+    gui_str_big("BrickOS", tx, ly + 12, 0xFFFFFF, 2);
+
+    /* Progress bar track (Windows XP sunken marquee style) */
+    int track_w = 160, track_h = 13;
+    int bx = (fw - track_w) / 2;
+    int by = ly + 72;
+
+    gui_rect(bx - 2, by - 2, track_w + 4, track_h + 4, 0x2A3852);
+    gui_rect(bx - 1, by - 1, track_w + 2, track_h + 2, 0x141C2A);
+    gui_rect(bx, by, track_w, track_h, 0x000000);
+
+    /* Rounded corners */
+    gui_pixel(bx - 2, by - 2, 0x000000);
+    gui_pixel(bx + track_w + 1, by - 2, 0x000000);
+    gui_pixel(bx - 2, by + track_h + 1, 0x000000);
+    gui_pixel(bx + track_w + 1, by + track_h + 1, 0x000000);
+
+    /* Footer text */
+    const char* foot = "Starting BrickOS...";
+    int fl = gui_str_width(foot);
+    gui_print(foot, (fw - fl) / 2, fh - 35, 0x555566);
+
     gui_flip();
 
+    /* 3 scrolling blue marquee blocks (authentic Windows XP style) */
+    int group_w = 24; /* 3 blocks of 6px with 3px gap */
     u32 t = ticks;
-    for (int pct = 0; pct <= 100; pct += 2) {
-        while (ticks < t + 2) __asm__ volatile("hlt");
-        t = ticks;
-        u32 r = 0x20 + (pct * 2);
-        u32 g = 0x60 + (pct);
-        u32 bc = (r << 16) | (g << 8) | 0xFF;
-        gui_rect(bx, by, 280 * pct / 100, bh, bc);
-        char pb[5];
-        itoa(pb, (u32)pct);
-        int pl = my_strlen(pb);
-        gui_rect((fw - 32) / 2, by + 16, 32, 14, 0x000000);
-        gui_print(pb, (fw - pl * 8) / 2, by + 16, 0x8888AA);
-        gui_flip();
+
+    for (int pass = 0; pass < 4; pass++) {
+        for (int pos = -group_w; pos < track_w + 5; pos += 3) {
+            while (ticks < t + 2) __asm__ volatile("hlt");
+            t = ticks;
+
+            /* Any key skips boot animation */
+            if (kbd_try()) goto boot_done;
+
+            /* Clear inside track */
+            gui_rect(bx, by + 1, track_w, track_h - 2, 0x000000);
+
+            /* Draw 3 glossy blue blocks */
+            for (int k = 0; k < 3; k++) {
+                int x0 = bx + pos + k * 9;
+                for (int cx = x0; cx < x0 + 6; cx++) {
+                    if (cx < bx || cx >= bx + track_w) continue;
+                    for (int ry = 0; ry < 9; ry++) {
+                        int cy = by + 2 + ry;
+                        u32 color = 0x0066FF;
+                        if (ry == 0) color = 0xA0E4FF;
+                        else if (ry == 1) color = 0x50B4FF;
+                        else if (ry >= 2 && ry <= 5) color = 0x0066FF;
+                        else if (ry == 6 || ry == 7) color = 0x0040C0;
+                        else color = 0x002080;
+
+                        if (cx == x0 || cx == x0 + 5) {
+                            if (ry > 1 && ry < 7) color = 0x3388FF;
+                        }
+                        gui_pixel(cx, cy, color);
+                    }
+                }
+            }
+            gui_flip();
+        }
     }
+
+boot_done:
     t = ticks;
-    while (ticks < t + 60) __asm__ volatile("hlt");
+    while (ticks < t + 20) __asm__ volatile("hlt");
 }
 
 /* Window Manager */
@@ -1161,7 +1301,7 @@ void open_app(int app_id) {
     switch (app_id) {
         case APP_PAINT: {
             int wi = win_new(APP_PAINT, 100, 50, 560, 400, "Paint");
-            if (wi >= 0) { paint_clear(); paint_dirty = 0; }
+            if (wi >= 0) { paint_init(); }
             break;
         }
         case APP_NOTEPAD: {
@@ -1199,6 +1339,9 @@ void open_app(int app_id) {
             break;
         case APP_WELCOME:
             win_new(APP_WELCOME, 180, 80, 420, 250, "Welcome");
+            break;
+        case APP_BMPVIEW:
+            open_bmp_viewer("BRICK.BMP");
             break;
         default: break;
     }
@@ -1252,65 +1395,246 @@ static void draw_desk_label(const char* label, int cx, int y, int selected) {
     }
 }
 
+static void draw_icon_my_computer(int x, int y) {
+    /* Monitor casing */
+    gui_rect(x + 2, y, 26, 20, 0xC0C0C0);
+    gui_hline(x + 2, y, 26, 0xFFFFFF); gui_vline(x + 2, y, 20, 0xFFFFFF);
+    gui_hline(x + 2, y + 19, 26, 0x404040); gui_vline(x + 27, y, 20, 0x404040);
+    /* Screen inner bezel */
+    gui_rect(x + 5, y + 3, 20, 14, 0x808080);
+    gui_hline(x + 5, y + 3, 20, 0x404040); gui_vline(x + 5, y + 3, 14, 0x404040);
+    gui_hline(x + 5, y + 16, 20, 0xFFFFFF); gui_vline(x + 24, y + 3, 14, 0xFFFFFF);
+    /* Screen content (teal Win95 desktop) */
+    gui_rect(x + 6, y + 4, 18, 12, 0x008080);
+    /* Little window on screen */
+    gui_rect(x + 8, y + 6, 10, 7, 0xFFFFFF);
+    gui_rect(x + 8, y + 6, 10, 2, 0x000080);
+    /* Monitor neck */
+    gui_rect(x + 12, y + 20, 6, 3, 0xA0A0A0);
+    /* Monitor stand base */
+    gui_rect(x + 8, y + 22, 14, 2, 0xD0D0D0);
+    gui_hline(x + 8, y + 22, 14, 0xFFFFFF);
+    gui_hline(x + 8, y + 23, 14, 0x404040);
+    /* Desktop PC tower/box underneath */
+    gui_rect(x + 1, y + 24, 30, 8, 0xC0C0C0);
+    gui_hline(x + 1, y + 24, 30, 0xFFFFFF); gui_vline(x + 1, y + 24, 8, 0xFFFFFF);
+    gui_hline(x + 1, y + 31, 30, 0x404040); gui_vline(x + 30, y + 24, 8, 0x404040);
+    /* 3.5" Floppy drive slot */
+    gui_rect(x + 5, y + 26, 12, 2, 0x000000);
+    gui_rect(x + 18, y + 26, 2, 2, 0x808080);
+    /* Power LED (green) and switch */
+    gui_pixel(x + 23, y + 27, 0x00FF00);
+    gui_rect(x + 25, y + 26, 3, 3, 0x808080);
+}
+
+static void draw_icon_ctrlpanel(int x, int y) {
+    /* Folder back tab */
+    gui_rect(x + 2, y + 4, 11, 4, 0xC89820);
+    gui_hline(x + 2, y + 4, 11, 0xFFE080);
+    /* Folder body */
+    gui_rect(x + 2, y + 7, 28, 22, 0xD4A028);
+    gui_hline(x + 2, y + 7, 28, 0xFFE890);
+    gui_vline(x + 2, y + 7, 22, 0xFFE890);
+    gui_hline(x + 2, y + 28, 28, 0x604000);
+    gui_vline(x + 29, y + 7, 22, 0x604000);
+    /* White sheet / panel inside folder */
+    gui_rect(x + 5, y + 10, 22, 16, 0xFFFFFF);
+    gui_hline(x + 5, y + 10, 22, 0x808080); gui_vline(x + 5, y + 10, 16, 0x808080);
+    /* Three slider tracks */
+    for (int s = 0; s < 3; s++) {
+        int sy2 = y + 13 + s * 4;
+        gui_hline(x + 7, sy2, 18, 0x808080);
+        gui_pixel(x + 7, sy2 + 1, 0xC0C0C0);
+    }
+    /* Slider knobs (3D metallic) */
+    int kx[3] = {11, 19, 14};
+    for (int s = 0; s < 3; s++) {
+        int sx2 = x + kx[s], sy2 = y + 12 + s * 4;
+        gui_rect(sx2, sy2, 4, 3, 0xC0C0C0);
+        gui_hline(sx2, sy2, 4, 0xFFFFFF);
+        gui_vline(sx2, sy2, 3, 0xFFFFFF);
+        gui_hline(sx2, sy2 + 2, 4, 0x000000);
+        gui_vline(sx2 + 3, sy2, 3, 0x000000);
+    }
+}
+
+static void draw_icon_notepad(int x, int y) {
+    /* Notepad page with folded corner */
+    gui_rect(x + 5, y + 2, 19, 27, 0xFFFFFF);
+    /* Folded corner in top right */
+    gui_rect(x + 19, y + 2, 5, 5, 0xC0C0C0);
+    gui_hline(x + 19, y + 7, 5, 0x808080);
+    gui_vline(x + 18, y + 2, 5, 0x808080);
+    /* Outer border */
+    gui_hline(x + 5, y + 2, 14, 0x808080);
+    gui_vline(x + 5, y + 2, 27, 0x808080);
+    gui_hline(x + 5, y + 28, 19, 0x808080);
+    gui_vline(x + 23, y + 7, 22, 0x808080);
+    /* Notebook spiral rings on left */
+    for (int r = 0; r < 5; r++) {
+        int ry = y + 5 + r * 5;
+        gui_rect(x + 3, ry, 4, 2, 0x404040);
+        gui_pixel(x + 4, ry, 0xFFFFFF);
+    }
+    /* Ruled blue lines */
+    for (int l = 0; l < 4; l++) {
+        gui_hline(x + 8, y + 9 + l * 4, 12, 0x5080C0);
+    }
+    /* Yellow HB Pencil resting diagonally */
+    for (int p = 0; p < 12; p++) {
+        int px2 = x + 12 + p, py2 = y + 28 - p;
+        gui_pixel(px2, py2, 0xFFA500);
+        gui_pixel(px2 + 1, py2, 0xFFD700);
+        gui_pixel(px2, py2 - 1, 0xD48800);
+    }
+    /* Pencil lead tip */
+    gui_pixel(x + 11, y + 29, 0x000000);
+    gui_pixel(x + 12, y + 29, 0xC49A6C);
+    /* Pencil eraser (pink) and metal ferrule */
+    gui_rect(x + 23, y + 16, 3, 2, 0xC0C0C0);
+    gui_rect(x + 24, y + 14, 3, 2, 0xFF6B81);
+}
+
+static void draw_icon_paint(int x, int y) {
+    /* Artist wooden palette */
+    for (int r = 0; r < 20; r++) {
+        int rw = (r < 3 || r > 16) ? 18 : ((r < 7 || r > 13) ? 24 : 26);
+        int rx2 = (r < 3) ? 5 : ((r > 16) ? 7 : 3);
+        gui_rect(x + rx2, y + 5 + r, rw, 1, 0xDDB878);
+        gui_pixel(x + rx2, y + 5 + r, 0xFFE8B0);
+        gui_pixel(x + rx2 + rw - 1, y + 5 + r, 0x8A6020);
+    }
+    /* Thumb hole */
+    gui_rect(x + 21, y + 16, 4, 5, desktop_color);
+    gui_hline(x + 21, y + 15, 4, 0x8A6020);
+    gui_vline(x + 20, y + 16, 5, 0x8A6020);
+    gui_hline(x + 21, y + 21, 4, 0xFFE8B0);
+    /* 4 Vibrant Paint Blobs with highlights */
+    /* Red */
+    gui_rect(x + 6, y + 8, 4, 4, 0xD01010);
+    gui_pixel(x + 7, y + 9, 0xFF7070);
+    /* Yellow */
+    gui_rect(x + 13, y + 7, 4, 4, 0xE8C000);
+    gui_pixel(x + 14, y + 8, 0xFFFF80);
+    /* Blue */
+    gui_rect(x + 8, y + 15, 4, 4, 0x1030D0);
+    gui_pixel(x + 9, y + 16, 0x7090FF);
+    /* Green */
+    gui_rect(x + 13, y + 19, 4, 4, 0x10A020);
+    gui_pixel(x + 14, y + 20, 0x70FF70);
+
+    /* Paintbrush crossing diagonally */
+    for (int b = 0; b < 14; b++) {
+        int bx2 = x + 16 + b, by2 = y + 26 - b;
+        gui_pixel(bx2, by2, 0x804010);
+    }
+    /* Ferrule (metal) */
+    gui_rect(x + 14, y + 27, 3, 2, 0xC0C0C0);
+    /* Bristles + dipped in red */
+    gui_rect(x + 12, y + 28, 3, 2, 0x202020);
+    gui_pixel(x + 11, y + 29, 0xE01010);
+}
+
+static void draw_icon_calc(int x, int y) {
+    /* Calculator body with 3D chiseled bevel */
+    gui_rect(x + 4, y + 2, 24, 28, 0xC0C0C0);
+    gui_hline(x + 4, y + 2, 24, 0xFFFFFF); gui_vline(x + 4, y + 2, 28, 0xFFFFFF);
+    gui_hline(x + 4, y + 29, 24, 0x404040); gui_vline(x + 27, y + 2, 28, 0x404040);
+    /* LCD screen (sunken 3D frame) */
+    gui_rect(x + 7, y + 5, 18, 7, 0x000000);
+    gui_hline(x + 7, y + 5, 18, 0x404040); gui_vline(x + 7, y + 5, 7, 0x404040);
+    gui_hline(x + 7, y + 11, 18, 0xFFFFFF); gui_vline(x + 24, y + 5, 7, 0xFFFFFF);
+    /* LCD background & number 0 */
+    gui_rect(x + 8, y + 6, 16, 5, 0x203028);
+    gui_print("0", x + 19, y + 4, 0x00FF80);
+    /* Keypad: Clear button (red) */
+    gui_rect(x + 7, y + 14, 5, 3, 0xD02020);
+    gui_pixel(x + 7, y + 14, 0xFFA0A0);
+    /* Memory / operation buttons top row */
+    gui_rect(x + 13, y + 14, 5, 3, 0x808080);
+    gui_rect(x + 19, y + 14, 6, 3, 0x000080);
+    /* Key grid (3x3 number pad) */
+    for (int row = 0; row < 3; row++) {
+        for (int col = 0; col < 3; col++) {
+            int kx2 = x + 7 + col * 4;
+            int ky2 = y + 19 + row * 3;
+            gui_rect(kx2, ky2, 3, 2, 0xD0D0D0);
+            gui_pixel(kx2, ky2, 0xFFFFFF);
+            gui_pixel(kx2 + 2, ky2 + 1, 0x404040);
+        }
+        /* Rightmost operator button (blue) */
+        int okx = x + 20, oky = y + 19 + row * 3;
+        gui_rect(okx, oky, 5, 2, 0x000090);
+        gui_pixel(okx, oky, 0x6080FF);
+    }
+}
+
+static void draw_icon_terminal(int x, int y) {
+    /* MS-DOS Prompt window icon */
+    gui_rect(x + 3, y + 4, 26, 23, 0xC0C0C0);
+    gui_hline(x + 3, y + 4, 26, 0xFFFFFF); gui_vline(x + 3, y + 4, 23, 0xFFFFFF);
+    gui_hline(x + 3, y + 26, 26, 0x404040); gui_vline(x + 28, y + 4, 23, 0x404040);
+    /* Title bar (blue) */
+    gui_rect(x + 5, y + 6, 22, 4, 0x000080);
+    gui_print("MS", x + 6, y + 4, 0xFFFFFF);
+    /* Close box */
+    gui_rect(x + 23, y + 7, 3, 2, 0xC0C0C0);
+    /* CRT interior (black) */
+    gui_rect(x + 5, y + 11, 22, 14, 0x000000);
+    /* Prompt text C:\> in bright green / white */
+    gui_print("C:>", x + 7, y + 11, 0x00FF00);
+    /* Blinking underscore cursor */
+    gui_hline(x + 20, y + 22, 4, 0x00FF00);
+}
+
+static void draw_icon_welcome(int x, int y) {
+    /* Authentic Windows 95/98 Flying 4-Color Flag */
+    /* Top-Left Red tile */
+    gui_rect(x + 5,  y + 5,  9, 9, 0xE02020);
+    gui_hline(x + 5, y + 5,  9, 0xFF7070); gui_vline(x + 5, y + 5, 9, 0xFF7070);
+    gui_hline(x + 5, y + 13, 9, 0x800000); gui_vline(x + 13, y + 5, 9, 0x800000);
+
+    /* Top-Right Green tile */
+    gui_rect(x + 17, y + 5,  9, 9, 0x00A020);
+    gui_hline(x + 17, y + 5,  9, 0x60F060); gui_vline(x + 17, y + 5, 9, 0x60F060);
+    gui_hline(x + 17, y + 13, 9, 0x005010); gui_vline(x + 25, y + 5, 9, 0x005010);
+
+    /* Bottom-Left Blue tile */
+    gui_rect(x + 5,  y + 17, 9, 9, 0x0040D0);
+    gui_hline(x + 5, y + 17, 9, 0x6090FF); gui_vline(x + 5, y + 17, 9, 0x6090FF);
+    gui_hline(x + 5, y + 25, 9, 0x001060); gui_vline(x + 13, y + 17, 9, 0x001060);
+
+    /* Bottom-Right Yellow tile */
+    gui_rect(x + 17, y + 17, 9, 9, 0xF0B000);
+    gui_hline(x + 17, y + 17, 9, 0xFFF070); gui_vline(x + 17, y + 17, 9, 0xFFF070);
+    gui_hline(x + 17, y + 25, 9, 0x805000); gui_vline(x + 25, y + 17, 9, 0x805000);
+
+    /* Trailing black/dark speed dots */
+    gui_pixel(x + 15, y + 9, 0x000000);
+    gui_pixel(x + 15, y + 21, 0x000000);
+    gui_pixel(x + 9, y + 15, 0x000000);
+    gui_pixel(x + 21, y + 15, 0x000000);
+}
+
 void draw_desk_icons(void) {
     for (int i = 0; i < NDESK_ICONS; i++) {
         struct DesktopIcon* d = &desk_icons[i];
         int x = d->x, y = d->y;
 
         if (d->app_id == APP_EXPLORER) {
-            /* Monitor icon */
-            gui_rect(x + 2, y + 2, 32, 24, 0x808080);
-            gui_rect(x + 4, y + 4, 28, 20, 0xC0C0C0);
-            gui_rect(x + 6, y + 6, 24, 16, 0x000080);
-            gui_rect(x + 14, y + 26, 8, 4, 0x808080);
-            gui_rect(x + 10, y + 30, 16, 3, 0xC0C0C0);
+            draw_icon_my_computer(x, y);
         } else if (d->app_id == APP_CTRLPANEL) {
-            /* Gears icon */
-            gui_rect(x + 6, y + 6, 24, 24, 0x808080);
-            gui_rect(x + 10, y + 10, 16, 16, 0xD0D0D0);
-            gui_rect(x + 14, y + 14, 8, 8, 0x000080);
+            draw_icon_ctrlpanel(x, y);
         } else if (d->app_id == APP_NOTEPAD) {
-            /* Notepad paper icon */
-            gui_rect(x + 6, y + 4, 22, 26, 0xFFFFFF);
-            gui_hline(x + 6, y + 4, 22, 0x808080); gui_vline(x + 6, y + 4, 26, 0x808080);
-            gui_hline(x + 6, y + 29, 22, 0x808080); gui_vline(x + 27, y + 4, 26, 0x808080);
-            gui_hline(x + 9, y + 9, 14, 0x0000AA);
-            gui_hline(x + 9, y + 14, 14, 0x0000AA);
-            gui_hline(x + 9, y + 19, 14, 0x0000AA);
-            gui_hline(x + 9, y + 24, 10, 0x0000AA);
+            draw_icon_notepad(x, y);
         } else if (d->app_id == APP_PAINT) {
-            /* Palette icon */
-            for (int py2 = 6; py2 <= 26; py2++) {
-                int wspan = (py2 < 10 || py2 > 22) ? 18 : 24;
-                gui_rect(x + 6, y + py2, wspan, 1, 0xD2B48C);
-            }
-            gui_rect(x + 8, y + 10, 5, 4, 0xFF0000);
-            gui_rect(x + 15, y + 8, 5, 4, 0xFFFF00);
-            gui_rect(x + 22, y + 12, 5, 4, 0x0000FF);
+            draw_icon_paint(x, y);
         } else if (d->app_id == APP_CALC) {
-            /* Calculator icon */
-            gui_rect(x + 6, y + 4, 24, 28, 0xC0C0C0);
-            gui_hline(x + 6, y + 4, 24, 0xFFFFFF); gui_vline(x + 6, y + 4, 28, 0xFFFFFF);
-            gui_hline(x + 6, y + 31, 24, 0x000000); gui_vline(x + 29, y + 4, 28, 0x000000);
-            gui_rect(x + 9, y + 7, 18, 6, 0x000000);
-            gui_print("0", x + 21, y + 6, 0x00FF00);
-            gui_rect(x + 9, y + 16, 4, 4, 0x808080);
-            gui_rect(x + 16, y + 16, 4, 4, 0x808080);
-            gui_rect(x + 23, y + 16, 4, 4, 0x000080);
-            gui_rect(x + 9, y + 22, 4, 4, 0x808080);
-            gui_rect(x + 16, y + 22, 4, 4, 0x808080);
-            gui_rect(x + 23, y + 22, 4, 4, 0x000080);
+            draw_icon_calc(x, y);
         } else if (d->app_id == APP_TERMINAL) {
-            /* DOS terminal icon */
-            gui_rect(x + 4, y + 6, 26, 22, 0x000000);
-            gui_hline(x + 4, y + 6, 26, 0x808080); gui_vline(x + 4, y + 6, 22, 0x808080);
-            gui_hline(x + 4, y + 27, 26, 0xFFFFFF); gui_vline(x + 29, y + 6, 22, 0xFFFFFF);
-            gui_print("C:>", x + 7, y + 10, 0xFFFFFF);
+            draw_icon_terminal(x, y);
         } else {
-            /* Windows logo / sphere */
-            gui_rect(x + 6, y + 6, 24, 24, 0x000080);
-            gui_rect(x + 10, y + 10, 16, 16, 0x4488FF);
-            gui_print("i", x + 16, y + 10, 0xFFFFFF);
+            draw_icon_welcome(x, y);
         }
         draw_desk_label(d->label, x + 18, y + 36, desk_sel == i);
     }
@@ -1416,6 +1740,7 @@ void dispatch_key(char c) {
             case APP_NOTEPAD:  notepad_key(c, &wins[i]); note_active = 1; return;
             case APP_TERMINAL: terminal_key(c); term_active = 1; return;
             case APP_CALC:     calc_key(c); calc_active = 1; return;
+            case APP_EXPLORER: explorer_key(c, &wins[i]); return;
             default: return;
         }
     }
@@ -1443,7 +1768,6 @@ void run_gui(void) {
     ctx_open = 0;
     nwins = 0;
 
-    open_app(APP_WELCOME);
     paint_init();
     note_init();
     term_init();
@@ -1994,6 +2318,7 @@ void run_gui(void) {
 
 /* Console initialization & CLI */
 void console_init(void) {
+    drv_display_init();
     bi_fb = *(u32*)0x704;
     if (*(u16*)0x708 >= 640 && *(u16*)0x70A >= 480) {
         fw = *(u16*)0x708;
@@ -2054,6 +2379,7 @@ void cmd_sysinfo(void) {
 void cmd_vesainfo(void) {
     con_print("VESA / Framebuffer Status:\n");
     con_print("  Active GUI (use_fb): "); con_dec(use_fb); con_char('\n');
+    con_print("  Hardware Driver    : "); con_print(drv_display_get_hw_name()); con_char('\n');
     con_print("  VESA flag  (0x70F) : "); con_dec(bi_vesa); con_char('\n');
     con_print("  Last Mode  (0x702) : 0x"); con_hex16(*(u16*)0x702); con_char('\n');
     con_print("  Resolution         : "); con_dec(*(u16*)0x708); con_print(" x "); con_dec(*(u16*)0x70A); con_char('\n');

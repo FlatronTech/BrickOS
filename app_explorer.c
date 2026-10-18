@@ -154,7 +154,7 @@ void explorer_click(struct Window* w, int mx, int my) {
                     int is_bin = (e[8] == 'B' && e[9] == 'I' && e[10] == 'N');
                     int is_bmp = (e[8] == 'B' && e[9] == 'M' && e[10] == 'P');
 
-                    if (f_idx == expl_last_idx && ticks - expl_last_t < 50) {
+                    if (f_idx == expl_last_idx && ticks - expl_last_t < 80) {
                         if (is_bmp) {
                             open_bmp_viewer(nm);
                         } else if (!is_bin) {
@@ -170,6 +170,59 @@ void explorer_click(struct Window* w, int mx, int my) {
                 }
                 cnt++;
             }
+        }
+    }
+}
+
+void explorer_key(char c, struct Window* w) {
+    if (w->app_state == 0) {
+        if (c == '\n') w->app_state = 1;
+        return;
+    }
+
+    if (c == '\b') {
+        w->app_state = 0;
+        expl_sel_idx = -1;
+        return;
+    }
+
+    if (c == KEY_UP) {
+        if (expl_sel_idx > 0) expl_sel_idx--;
+        return;
+    }
+
+    if (c == KEY_DOWN) {
+        expl_sel_idx++;
+        return;
+    }
+
+    if (c == '\n' && expl_sel_idx >= 0) {
+        u8* root = ramdisk + root_sect * 512;
+        int cnt = 0;
+        for (int i = 0; i < root_cnt; i++) {
+            u8* e = root + i * 32;
+            if (e[0] == 0) break;
+            if (e[0] == 0xE5 || e[11] == 0x0F) continue;
+
+            if (cnt == expl_sel_idx) {
+                char nm[14];
+                int ni = 0;
+                for (int j = 0; j < 8 && e[j] != ' '; j++) nm[ni++] = e[j];
+                nm[ni++] = '.';
+                for (int j = 8; j < 11 && e[j] != ' '; j++) nm[ni++] = e[j];
+                nm[ni] = 0;
+
+                int is_bin = (e[8] == 'B' && e[9] == 'I' && e[10] == 'N');
+                int is_bmp = (e[8] == 'B' && e[9] == 'M' && e[10] == 'P');
+
+                if (is_bmp) {
+                    open_bmp_viewer(nm);
+                } else if (!is_bin) {
+                    open_file_in_notepad(nm);
+                }
+                return;
+            }
+            cnt++;
         }
     }
 }

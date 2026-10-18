@@ -7,8 +7,11 @@ typedef unsigned int   u32;
 
 /* I/O port helpers */
 static inline u8   inb(u16 p){u8 r;__asm__ volatile("inb %w1,%0":"=a"(r):"Nd"(p));return r;}
+static inline u16  inw(u16 p){u16 r;__asm__ volatile("inw %w1,%0":"=a"(r):"Nd"(p));return r;}
+static inline u32  inl(u16 p){u32 r;__asm__ volatile("inl %w1,%0":"=a"(r):"Nd"(p));return r;}
 static inline void outb(u16 p,u8 v){__asm__ volatile("outb %0,%w1"::"a"(v),"Nd"(p));}
 static inline void outw(u16 p,u16 v){__asm__ volatile("outw %0,%w1"::"a"(v),"Nd"(p));}
+static inline void outl(u16 p,u32 v){__asm__ volatile("outl %0,%w1"::"a"(v),"Nd"(p));}
 
 /* String & memory utilities */
 int  my_strcmp(const char* a, const char* b);
@@ -112,6 +115,12 @@ void cpuid(u32 ax, u32* a, u32* b, u32* c, u32* d);
 void get_cpu_brand(char* out, int max_len);
 void get_rtc_time(char* out);
 void system_shutdown(void);
+void vesa_live_switch(u16 mode);
+
+/* VESA mode numbers */
+#define VESA_800x600  0x4115
+#define VESA_640x480  0x4112
+
 
 /* Shared dialogs */
 void open_saveas_dialog(int for_paint);

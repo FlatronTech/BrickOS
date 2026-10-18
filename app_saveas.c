@@ -4,6 +4,7 @@
 
 static char saveas_buf[16] = "FILE.TXT";
 static int  saveas_target = 0; /* 0 = Notepad, 1 = Paint */
+static int  saveas_first_key = 1;
 
 void open_saveas_dialog(int for_paint) {
     int ex = win_find(APP_SAVEAS);
@@ -12,6 +13,7 @@ void open_saveas_dialog(int for_paint) {
         return;
     }
     saveas_target = for_paint;
+    saveas_first_key = 1;
     if (for_paint) {
         my_strcpy(saveas_buf, paint_filename[0] ? paint_filename : "UNTITLED.BMP");
     } else {
@@ -34,6 +36,21 @@ void saveas_close(void) {
 
 void saveas_confirm(void) {
     if (!saveas_buf[0]) return;
+
+    /* If user didn't specify extension, append appropriate extension */
+    int has_dot = 0;
+    for (int i = 0; saveas_buf[i]; i++) {
+        if (saveas_buf[i] == '.') { has_dot = 1; break; }
+    }
+    if (!has_dot) {
+        int l = my_strlen(saveas_buf);
+        if (saveas_target == 1 && l <= 8) {
+            my_strcat(saveas_buf, ".BMP");
+        } else if (saveas_target == 0 && l <= 8) {
+            my_strcat(saveas_buf, ".TXT");
+        }
+    }
+
     if (saveas_target == 1) {
         my_strcpy(paint_filename, saveas_buf);
         save_paint_bmp();
@@ -95,14 +112,28 @@ void saveas_click(struct Window* w, int mx, int my) {
 }
 
 void saveas_key(char c) {
-    int len = my_strlen(saveas_buf);
     if (c == '\n') {
         saveas_confirm();
-    } else if (c == 27) {
+        return;
+    }
+    if (c == 27) {
         saveas_close();
-    } else if (c == '\b') {
+        return;
+    }
+    if (c == '\b') {
+        saveas_first_key = 0;
+        int len = my_strlen(saveas_buf);
         if (len > 0) saveas_buf[len - 1] = 0;
-    } else if (len < 12) {
+        return;
+    }
+
+    if (saveas_first_key) {
+        saveas_buf[0] = 0;
+        saveas_first_key = 0;
+    }
+
+    int len = my_strlen(saveas_buf);
+    if (len < 12) {
         if (c >= 'a' && c <= 'z') c -= 32;
         if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
             saveas_buf[len] = c;

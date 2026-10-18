@@ -1,9 +1,5 @@
 #include "app_paint.h"
 
-/* Access to kernel backbuffer for direct pixel blit */
-extern u8* backbuf;
-extern int fpitch, fbpp;
-
 int paint_dirty = 0;
 char paint_filename[16] = "UNTITLED.BMP";
 
@@ -25,6 +21,7 @@ void paint_init(void) {
     prev_draw_x = -1;
     prev_draw_y = -1;
     paint_saved_t = 0;
+    paint_color = 0x000000;
     my_strcpy(paint_filename, "UNTITLED.BMP");
     paint_clear();
 }
@@ -36,27 +33,27 @@ void paint_clear(void) {
     }
 }
 
-static void draw_brush_point(int bx, int by) {
+static void draw_brush_point(int bx, int by, int max_w, int max_h) {
     u32* cv = PAINT_CANVAS;
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             int nx = bx + dx, ny = by + dy;
-            if (nx >= 0 && nx < MAX_CANVAS_W && ny >= 0 && ny < MAX_CANVAS_H) {
+            if (nx >= 0 && nx < max_w && ny >= 0 && ny < max_h) {
                 cv[ny * MAX_CANVAS_W + nx] = paint_color;
             }
         }
     }
 }
 
-static void draw_brush_line(int x0, int y0, int x1, int y1) {
+static void draw_brush_line(int x0, int y0, int x1, int y1, int max_w, int max_h) {
     int dx = x1 - x0; if (dx < 0) dx = -dx;
     int sx = (x0 < x1) ? 1 : -1;
     int dy = y1 - y0; if (dy < 0) dy = -dy; dy = -dy;
     int sy = (y0 < y1) ? 1 : -1;
     int err = dx + dy;
     int iter = 0;
-    while (iter++ < (MAX_CANVAS_W + MAX_CANVAS_H) * 2) {
-        draw_brush_point(x0, y0);
+    while (iter++ < (max_w + max_h) * 2) {
+        draw_brush_point(x0, y0, max_w, max_h);
         if (x0 == x1 && y0 == y1) break;
         int e2 = 2 * err;
         if (e2 >= dy) { err += dy; x0 += sx; }
@@ -66,7 +63,7 @@ static void draw_brush_line(int x0, int y0, int x1, int y1) {
 
 void save_paint_bmp(void) {
     u8* bmp_buf = PAINT_SCRATCH;
-    int W = MAX_CANVAS_W, H = MAX_CANVAS_H;
+    int W = 400, H = 300;
     int row_stride = ((W * 3 + 3) / 4) * 4;
     int data_sz = row_stride * H;
     int file_sz = 54 + data_sz;
@@ -80,9 +77,8 @@ void save_paint_bmp(void) {
     bmp_buf[14] = 40; bmp_buf[15] = 0; bmp_buf[16] = 0; bmp_buf[17] = 0;
     bmp_buf[18] = W & 0xFF; bmp_buf[19] = (W >> 8) & 0xFF;
     bmp_buf[20] = (W >> 16) & 0xFF; bmp_buf[21] = (W >> 24) & 0xFF;
-    int nH = -H;
-    bmp_buf[22] = nH & 0xFF; bmp_buf[23] = (nH >> 8) & 0xFF;
-    bmp_buf[24] = (nH >> 16) & 0xFF; bmp_buf[25] = (nH >> 24) & 0xFF;
+    bmp_buf[22] = H & 0xFF; bmp_buf[23] = (H >> 8) & 0xFF;
+    bmp_buf[24] = (H >> 16) & 0xFF; bmp_buf[25] = (H >> 24) & 0xFF;
     bmp_buf[26] = 1; bmp_buf[27] = 0; bmp_buf[28] = 24; bmp_buf[29] = 0;
     bmp_buf[30] = 0; bmp_buf[31] = 0; bmp_buf[32] = 0; bmp_buf[33] = 0;
     bmp_buf[34] = data_sz & 0xFF; bmp_buf[35] = (data_sz >> 8) & 0xFF;
@@ -91,9 +87,11 @@ void save_paint_bmp(void) {
 
     u32* cv = PAINT_CANVAS;
     for (int y = 0; y < H; y++) {
+        /* BMP standard is bottom-up: file row y is image row (H - 1 - y) */
         u8* row = bmp_buf + 54 + y * row_stride;
+        u32* src = cv + (H - 1 - y) * MAX_CANVAS_W;
         for (int x = 0; x < W; x++) {
-            u32 c = cv[y * W + x];
+            u32 c = src[x];
             row[x * 3 + 0] = c & 0xFF;
             row[x * 3 + 1] = (c >> 8) & 0xFF;
             row[x * 3 + 2] = (c >> 16) & 0xFF;
@@ -101,14 +99,15 @@ void save_paint_bmp(void) {
         for (int p = W * 3; p < row_stride; p++) row[p] = 0;
     }
 
-    fat_write_file(paint_filename[0] ? paint_filename : "UNTITLED.BMP", bmp_buf, 54 + data_sz);
-    paint_dirty = 0;
-    paint_saved_t = ticks + 200;
+    int res = fat_write_file(paint_filename[0] ? paint_filename : "UNTITLED.BMP", bmp_buf, 54 + data_sz);
+    if (res == 0) {
+        paint_dirty = 0;
+        paint_saved_t = ticks + 200;
+    }
 }
 
 void paint_mouse_move(struct Window* w, int mx, int my, int btn) {
     int px = win_client_x(w), py0 = win_client_y(w), cw = win_client_w(w), ch = win_client_h(w);
-    /* canvas starts below 22px toolbar, with 1px border */
     int can_x = px + 1, can_y = py0 + 23;
     int can_w = cw - 2;
     int can_h = ch - 24;
@@ -120,29 +119,26 @@ void paint_mouse_move(struct Window* w, int mx, int my, int btn) {
         if (mx >= can_x && mx < can_x + can_w && my >= can_y && my < can_y + can_h) {
             int cur_x = mx - can_x;
             int cur_y = my - can_y;
-            /* clamp to canvas */
             if (cur_x < 0) cur_x = 0;
-            if (cur_x >= MAX_CANVAS_W) cur_x = MAX_CANVAS_W - 1;
+            if (cur_x >= can_w) cur_x = can_w - 1;
             if (cur_y < 0) cur_y = 0;
-            if (cur_y >= MAX_CANVAS_H) cur_y = MAX_CANVAS_H - 1;
+            if (cur_y >= can_h) cur_y = can_h - 1;
 
             if (is_drawing && prev_draw_x >= 0 && prev_draw_y >= 0) {
-                draw_brush_line(prev_draw_x, prev_draw_y, cur_x, cur_y);
+                draw_brush_line(prev_draw_x, prev_draw_y, cur_x, cur_y, can_w, can_h);
             } else {
-                draw_brush_point(cur_x, cur_y);
+                draw_brush_point(cur_x, cur_y, can_w, can_h);
                 is_drawing = 1;
             }
             prev_draw_x = cur_x;
             prev_draw_y = cur_y;
             paint_dirty = 1;
         } else {
-            /* Mouse left canvas area — stop line from prev point */
             is_drawing = 0;
             prev_draw_x = -1;
             prev_draw_y = -1;
         }
     } else {
-        /* Button released — end stroke */
         is_drawing = 0;
         prev_draw_x = -1;
         prev_draw_y = -1;
@@ -150,7 +146,7 @@ void paint_mouse_move(struct Window* w, int mx, int my, int btn) {
 }
 
 void paint_click(struct Window* w, int mx, int my) {
-    int px = win_client_x(w), py0 = win_client_y(w), cw = win_client_w(w);
+    int px = win_client_x(w), py0 = win_client_y(w), cw = win_client_w(w), ch = win_client_h(w);
     int cbx = px + cw - 170, cby = py0 + 2;
     int sbx = px + cw - 118, sby = py0 + 2;
     int sabx = px + cw - 60, saby = py0 + 2;
@@ -181,25 +177,11 @@ void paint_click(struct Window* w, int mx, int my) {
         open_saveas_dialog(1);
         return;
     }
-}
 
-/* Blit canvas rows directly into backbuffer (avoids gui_pixel overhead).    */
-static void paint_blit_canvas(int can_x, int can_y, int can_w, int can_h) {
-    if (!backbuf || fbpp < 24) return;
-    int bpp_bytes = fbpp / 8;
-    u32* cv = PAINT_CANVAS;
-    for (int j = 0; j < can_h; j++) {
-        int sy = can_y + j;
-        if (sy < 0 || sy >= fh) continue;
-        u32* src_row = cv + j * MAX_CANVAS_W;
-        u8*  dst_row = backbuf + sy * fpitch + can_x * bpp_bytes;
-        for (int i = 0; i < can_w; i++) {
-            u32 c = src_row[i];
-            dst_row[i * bpp_bytes + 0] = (u8)(c & 0xFF);
-            dst_row[i * bpp_bytes + 1] = (u8)((c >> 8)  & 0xFF);
-            dst_row[i * bpp_bytes + 2] = (u8)((c >> 16) & 0xFF);
-            if (bpp_bytes == 4) dst_row[i * bpp_bytes + 3] = 0;
-        }
+    int can_x = px + 1, can_y = py0 + 23;
+    int can_w = cw - 2, can_h = ch - 24;
+    if (mx >= can_x && mx < can_x + can_w && my >= can_y && my < can_y + can_h) {
+        paint_mouse_move(w, mx, my, 1);
     }
 }
 
@@ -243,8 +225,32 @@ void draw_paint(struct Window* w, int mx, int my, int btn) {
     if (can_h > MAX_CANVAS_H) can_h = MAX_CANVAS_H;
     if (can_w <= 0 || can_h <= 0) return;
 
-    /* Blit canvas pixels directly to the back buffer */
-    paint_blit_canvas(can_x, can_y, can_w, can_h);
+    /* Fast direct blit of canvas to backbuffer */
+    extern u8* backbuf;
+    extern int fpitch, fbpp;
+    int bpp_bytes = fbpp / 8;
+    u32* cv = PAINT_CANVAS;
+    for (int j = 0; j < can_h; j++) {
+        int sy = can_y + j;
+        if (sy < 0 || sy >= fh) continue;
+        u32* src = cv + j * MAX_CANVAS_W;
+        u8* dst = backbuf + sy * fpitch + can_x * bpp_bytes;
+        int max_w = can_w;
+        if (can_x + max_w > fw) max_w = fw - can_x;
+        if (max_w <= 0) continue;
+
+        if (bpp_bytes == 4) {
+            u32* dst32 = (u32*)dst;
+            for (int i = 0; i < max_w; i++) dst32[i] = src[i];
+        } else {
+            for (int i = 0; i < max_w; i++) {
+                u32 c = src[i];
+                dst[i * 3 + 0] = c & 0xFF;
+                dst[i * 3 + 1] = (c >> 8) & 0xFF;
+                dst[i * 3 + 2] = (c >> 16) & 0xFF;
+            }
+        }
+    }
 
     /* Canvas border */
     gui_hline(can_x - 1, can_y - 1, can_w + 2, 0x808080);

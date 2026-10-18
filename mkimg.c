@@ -65,10 +65,6 @@ int main(int argc, char** argv) {
     fat_set(0, 0xFF0); fat_set(1, 0xFFF);
     add_file("BRICKOS.BIN", kern, ks);
     const char* readme =
-        "BrickOS v2.0 - hobby OS by Flatronix.\r\n"
-        "32-bit protected mode, own bootloader,\r\n"
-        "IDT+PIT interrupts, FAT12/16 RAM disk,\r\n"
-        "VESA graphics console with BIOS font.\r\n"
         "Commands: help ls cat meminfo sysinfo time clear about reboot\r\n";
     add_file("README.TXT", (unsigned char*)readme, strlen(readme));
     const char* hello = "Hello from BrickOS!\r\n";
@@ -95,6 +91,6 @@ int main(int argc, char** argv) {
 
     FILE* f = fopen(argv[3], "wb");
     fwrite(img, 1, sizeof(img), f); fclose(f);
-    printf("gruzos.img created (FAT12, 1.44MB)\n");
+    printf("%s created (FAT12, 1.44MB)\n", argv[3]);
     return 0;
 }
