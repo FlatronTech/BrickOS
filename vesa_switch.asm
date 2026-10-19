@@ -1,6 +1,4 @@
-; vesa_switch.asm — Bezpieczna zmiana trybu VESA bez restartu
-; Wczytywana pod 0x7000. Przechodzi do Real Mode z poprawnym IDTR (limit 0x3FF, base 0),
-; wywołuje BIOS int 10h i wraca do 32-bit PM z odtworzonym IDTR.
+; vesa_switch.asm
 
 [bits 32]
 [org  0x7000]
@@ -16,13 +14,13 @@ entry32:
 
     cli
 
-    ; Zapisz obecny (32-bit) IDTR
+    ; Save current (32-bit) IDTR
     sidt [saved_idtr - 0x7000 + 0x7000]
 
-    ; Załaduj Real Mode IDTR (wektory pod 0x0)
+    ; Load Real Mode IDT
     lidt [rm_idtr - 0x7000 + 0x7000]
 
-    ; Załaduj 16-bit GDT
+    ; Load 16-bit GDT
     lgdt [gdtptr16 - 0x7000 + 0x7000]
 
     jmp  0x08:(.pm16 - 0x7000 + 0x7000)
@@ -52,13 +50,13 @@ entry32:
     mov  ss, ax
     mov  sp, 0x6F00
 
-    ; Zmiana trybu VBE
+    ; Change VBE mode
     mov  ax, 0x4F02
     mov  bx, [mode_save - 0x7000 + 0x7000]
     or   bx, 0x4000             ; LFB
     int  0x10
 
-    ; Pobranie ModeInfoBlock
+    ; Download ModeInfoBlock
     xor  ax, ax
     mov  es, ax
     mov  ax, 0x4F01
@@ -66,7 +64,7 @@ entry32:
     mov  di, 0x7200
     int  0x10
 
-    ; Przepisz dane do BIOS data area (0x702..0x70F)
+    ; Copy data to BIOS data area
     mov  ax, [mode_save - 0x7000 + 0x7000]
     mov  [0x702], ax
     mov  ax, [0x7212]           ; XResolution
@@ -81,7 +79,7 @@ entry32:
     mov  eax, [0x7228]          ; LFB
     mov  [0x704], eax
 
-    ; Powrót do 32-bit Protected Mode
+    ; Back to 32-bit Protected Mode
     cli
     lgdt [gdtptr32 - 0x7000 + 0x7000]
 
@@ -100,7 +98,7 @@ entry32:
     mov  gs, ax
     mov  ss, ax
 
-    ; Odtwórz 32-bit IDTR kernela!
+    
     lidt [saved_idtr - 0x7000 + 0x7000]
 
     popfd
